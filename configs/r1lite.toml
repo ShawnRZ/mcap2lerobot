@@ -8,14 +8,36 @@
 
 robot_type = "galaxea_r1lite"
 fps = 30
+# 任务描述，写入每一帧；也可以用 convert --task 指定
+task = "pick up the cup"
 
 # 时间对齐：以 reference_topic 的每条消息为一帧，其他 topic 按 header.stamp 取最接近的消息。
 # 任一 topic 的 |Δt| 超过容差的帧是坏帧；首尾坏帧被裁掉，中间的坏帧和基准断点处把数据切成多个 episode。
 [sync]
 reference_topic = "/hdas/camera_head/left_raw/image_raw_color/compressed"
-max_dt_ms = 10          # 默认容差
-max_frame_gap = 1.6     # 基准相邻帧间隔超过 1.6 / fps 时切开
-min_episode_frames = 90 # 少于 3 秒的段丢弃
+max_dt_ms = 10                                                            # 默认容差
+max_frame_gap = 1.6                                                       # 基准相邻帧间隔超过 1.6 / fps 时切开
+min_episode_frames = 90                                                   # 少于 3 秒的段丢弃
+
+# 视频编码参数，不写时与 lerobot 默认值一致（CPU 上的 SVT-AV1）
+# [video]
+# vcodec = "libsvtav1"
+# pix_fmt = "yuv420p"
+# g = 2
+# crf = 30
+# preset = 12
+# fast_decode = 0
+#
+# 用 NVIDIA GPU 编码：crf 会作为恒定 QP 使用，且自动关闭 B 帧。
+# 注意 AV1 的 QP 范围是 0~255（H.264/HEVC 为 0~51），同样的数值画质差别很大。
+# 在本数据上与 libsvtav1 crf=30 画质相当（PSNR 约 45 dB）的取值：
+[video]
+vcodec = "av1_nvenc" # 需要 RTX 40 系列及以上
+crf = 110
+#
+# [video]
+# vcodec = "hevc_nvenc"  # 或 "h264_nvenc"
+# crf = 30
 
 # ---------- 相机 ----------
 
@@ -28,15 +50,21 @@ topic = "/hdas/camera_head/left_raw/image_raw_color/compressed"
 name = "observation.images.wrist_left"
 type = "video"
 topic = "/hdas/camera_wrist_left/color/image_raw/compressed"
-max_dt_ms = 35  # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
+max_dt_ms = 35                                               # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
 
 [[feature]]
 name = "observation.images.wrist_right"
 type = "video"
 topic = "/hdas/camera_wrist_right/color/image_raw/compressed"
-max_dt_ms = 35  # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
+max_dt_ms = 35                                                # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
 
 # ---------- 状态 ----------
+#
+# 夹爪可能没开机：optional = true 时，topic 在某个文件中完全缺失（或没有有效 stamp）
+# 就用 fill 填充该文件的所有帧，并且不参与对齐；有数据时照常对齐。
+# fill 的长度即该 source 的维度；请改成夹爪不工作时合理的静止位置，
+# 取值落在正常范围外会拉偏这一维的统计值，影响归一化。
+# 可选 source 的维度名在配置中就要确定，不再从消息推断，需要时用 names 指定。
 
 [[feature]]
 name = "observation.state"
@@ -55,7 +83,11 @@ name = "action"
 type = "vector"
 sources = [
     { topic = "/motion_target/target_joint_state_arm_left", field = "position" },
-    { topic = "/motion_target/target_position_gripper_left", field = "position", max_dt_ms = 30 }, # 约 20Hz
+    # 约 20Hz，容差放宽到 30ms
+    { topic = "/motion_target/target_position_gripper_left", field = "position", max_dt_ms = 30, optional = true, fill = [
+        100.0,
+    ] },
     { topic = "/motion_target/target_joint_state_arm_right", field = "position" },
-    { topic = "/motion_target/target_position_gripper_right", field = "position", max_dt_ms = 30 }, # 约 20Hz
+    # 约 20Hz，容差放宽到 30ms
+    { topic = "/motion_target/target_position_gripper_right", field = "position", max_dt_ms = 30 },
 ]

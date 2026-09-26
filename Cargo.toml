@@ -5,8 +5,13 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+arrow = { version = "60.0.0", default-features = false }
 clap = { version = "4.6.7", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+indicatif = "0.18.6"
 mcap = "0.25.0"
 memmap2 = "0.9.11"
+parquet = { version = "60.0.0", default-features = false, features = ["arrow", "snap"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
 toml = "1.1.6"

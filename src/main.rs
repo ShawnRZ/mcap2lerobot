@@ -1,9 +1,17 @@
 mod cdr;
 mod config;
 mod convert;
+mod dataset;
+mod decode;
+mod h264;
 mod info;
+mod inputs;
+mod progress;
+mod ros2msg;
+mod stats;
 mod sync;
 mod verify;
+mod video;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

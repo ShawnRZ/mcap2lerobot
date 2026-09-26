@@ -1,6 +1,9 @@
 //! 按时间戳把各 topic 对齐到基准 topic 的帧上，并按坏帧和基准断点切分 episode
 
+use anyhow::{Result, ensure};
 use std::ops::Range;
+
+use crate::config::Config;
 
 /// 对 `reference` 中的每个时间，找出 `stamps` 中最接近的元素下标；距离相同时取较早的一个。
 ///
@@ -125,6 +128,56 @@ pub fn plan(reference: &[i64], topics: &[TopicInput], options: &SyncOptions) -> 
     let (segments, short_segments) =
         runs.into_iter().partition(|r| r.len() >= options.min_episode_frames);
     SyncPlan { topics, bad, gaps, segments, short_segments }
+}
+
+/// 按配置对齐的结果
+pub struct ConfigPlan<'a> {
+    /// 基准 topic 已排序的 stamp，下标即帧号
+    pub reference: Vec<i64>,
+    /// (topic, 容差 ms)，与 `plan.topics` 一一对应；不含缺失的可选 topic
+    pub topics: Vec<(&'a str, f64)>,
+    /// 在本文件中缺失（没有有效 stamp）的可选 topic，由调用方用 fill 填充
+    pub missing_optional: Vec<&'a str>,
+    pub plan: SyncPlan,
+}
+
+/// 按 config.sync 对齐配置中的所有 topic；`stamps_of` 返回某 topic 的全部 stamp（任意顺序）
+pub fn plan_for_config<'a>(
+    config: &'a Config,
+    mut stamps_of: impl FnMut(&str) -> Vec<i64>,
+) -> Result<ConfigPlan<'a>> {
+    let mut valid_sorted = |topic: &str| {
+        let mut v: Vec<i64> = stamps_of(topic).into_iter().filter(|&st| st != 0).collect();
+        v.sort_unstable();
+        v
+    };
+    let reference = valid_sorted(&config.sync.reference_topic);
+    ensure!(reference.len() >= 2, "基准 topic 的有效 stamp 不足 2 个");
+
+    let mut topics = Vec::new();
+    let mut stamps = Vec::new();
+    let mut missing_optional = Vec::new();
+    for (topic, tol) in config.topic_tolerances() {
+        let s = valid_sorted(topic);
+        if s.is_empty() && config.is_optional_topic(topic) {
+            missing_optional.push(topic);
+        } else {
+            topics.push((topic, tol));
+            stamps.push(s);
+        }
+    }
+    let inputs: Vec<TopicInput> = stamps
+        .iter()
+        .zip(&topics)
+        .map(|(stamps, (_, tol_ms))| TopicInput { stamps, max_dt: (tol_ms * 1e6) as i64 })
+        .collect();
+    let frame_ns = 1e9 / config.fps as f64;
+    let options = SyncOptions {
+        max_frame_gap: (config.sync.max_frame_gap * frame_ns) as i64,
+        min_episode_frames: config.sync.min_episode_frames,
+    };
+    let plan = plan(&reference, &inputs, &options);
+    Ok(ConfigPlan { reference, topics, missing_optional, plan })
 }
 
 #[cfg(test)]

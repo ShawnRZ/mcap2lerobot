@@ -1,4 +1,4 @@
-//! 最小的 ROS2 CDR 读取器，只支持按顺序读取基本类型和字符串
+//! ROS2 CDR（XCDR1）读取器：按顺序读取基本类型、字符串和字节序列
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -31,18 +31,47 @@ impl<'a> CdrReader<'a> {
         Ok(bytes)
     }
 
+    /// 按 size 对齐后读取 N 字节，并按字节序转成小端排列
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        self.pos = self.pos.next_multiple_of(N);
+        let mut bytes: [u8; N] = self.take(N)?.try_into().unwrap();
+        if !self.little_endian {
+            bytes.reverse();
+        }
+        Ok(bytes)
+    }
+
+    pub fn read_u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    pub fn read_u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.read_array()?))
+    }
+
     pub fn read_u32(&mut self) -> Result<u32> {
-        self.pos = self.pos.next_multiple_of(4);
-        let bytes: [u8; 4] = self.take(4)?.try_into().unwrap();
-        Ok(if self.little_endian {
-            u32::from_le_bytes(bytes)
-        } else {
-            u32::from_be_bytes(bytes)
-        })
+        Ok(u32::from_le_bytes(self.read_array()?))
+    }
+
+    pub fn read_u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.read_array()?))
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
         Ok(self.read_u32()? as i32)
+    }
+
+    pub fn read_f32(&mut self) -> Result<f32> {
+        Ok(f32::from_le_bytes(self.read_array()?))
+    }
+
+    pub fn read_f64(&mut self) -> Result<f64> {
+        Ok(f64::from_le_bytes(self.read_array()?))
+    }
+
+    /// 读取 n 个字节（无对齐），用于 uint8[] 等字节序列
+    pub fn read_bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        self.take(n)
     }
 
     pub fn read_string(&mut self) -> Result<&'a str> {
