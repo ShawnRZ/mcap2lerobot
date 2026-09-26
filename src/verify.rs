@@ -9,7 +9,7 @@ use std::{
 use crate::cdr::CdrReader;
 use crate::config::{Config, FeatureKind};
 use crate::map_file;
-use crate::sync::nearest;
+use crate::sync::{self, SyncOptions, TopicInput};
 
 const COMPRESSED_IMAGE: &str = "sensor_msgs/msg/CompressedImage";
 const RAW_IMAGE: &str = "sensor_msgs/msg/Image";
@@ -114,7 +114,7 @@ fn intervals_ms(sorted: &[i64]) -> Vec<f64> {
     sorted.windows(2).map(|w| (w[1] - w[0]) as f64 / 1e6).collect()
 }
 
-pub fn run(args: &VerifyArgs, _verbose: u8) -> Result<()> {
+pub fn run(args: &VerifyArgs, verbose: u8) -> Result<()> {
     let config = Config::load(&args.config)?;
     let mut reports = collect_topics(&config);
     let index: HashMap<&str, usize> =
@@ -160,7 +160,7 @@ pub fn run(args: &VerifyArgs, _verbose: u8) -> Result<()> {
     for report in &reports {
         error_count += print_report(report, config.fps);
     }
-    error_count += check_alignment(&reports, &config.reference_topic);
+    error_count += check_sync(&reports, &config, verbose);
 
     println!();
     if error_count > 0 {
@@ -175,7 +175,7 @@ fn collect_topics(config: &Config) -> Vec<TopicReport<'_>> {
     let mut reports: Vec<TopicReport> = Vec::new();
     for feature in &config.features {
         let entries: Vec<(&str, TopicKind)> = match &feature.kind {
-            FeatureKind::Video { topic } => vec![(topic, TopicKind::Video)],
+            FeatureKind::Video { topic, .. } => vec![(topic, TopicKind::Video)],
             FeatureKind::Vector { sources } => {
                 sources.iter().map(|s| (s.topic.as_str(), TopicKind::Vector)).collect()
             }
@@ -337,56 +337,106 @@ fn check_stamps(stamps: &[i64], fps: u32, errors: &mut Vec<String>, warnings: &m
     }
 }
 
-/// 以基准 topic 的每一帧为准，统计其他 topic 最近消息的时间偏差，返回问题数
-fn check_alignment(reports: &[TopicReport], reference_topic: &str) -> usize {
-    let valid_sorted = |r: &TopicReport| {
-        let mut v: Vec<i64> = r.stamps.iter().copied().filter(|&st| st != 0).collect();
+/// 按 sync 配置对齐各 topic 并切分 episode，打印结果，返回问题数
+fn check_sync(reports: &[TopicReport], config: &Config, verbose: u8) -> usize {
+    let sync_config = &config.sync;
+    let valid_sorted = |topic: &str| {
+        let report = reports.iter().find(|r| r.topic == topic).expect("topic 来自同一份配置");
+        let mut v: Vec<i64> = report.stamps.iter().copied().filter(|&st| st != 0).collect();
         v.sort_unstable();
         v
     };
 
-    println!("\n对齐检查（基准 {reference_topic}）");
-    let reference = reports
-        .iter()
-        .find(|r| r.topic == reference_topic)
-        .map(valid_sorted)
-        .unwrap_or_default();
+    let reference_topic = sync_config.reference_topic.as_str();
+    let frame_ns = 1e9 / config.fps as f64;
+    println!("\n同步检查");
+    println!("  基准         : {reference_topic}");
+    println!(
+        "  规则         : 默认容差 {} ms，基准间隔 > {:.3} ms 处切开，少于 {} 帧的段丢弃",
+        sync_config.max_dt_ms,
+        sync_config.max_frame_gap * frame_ns / 1e6,
+        sync_config.min_episode_frames
+    );
+
+    let reference = valid_sorted(reference_topic);
     if reference.len() < 2 {
         println!("  ✗ 基准 topic 的有效 stamp 不足 2 个");
         return 1;
     }
-    let frame_ms =
-        (reference[reference.len() - 1] - reference[0]) as f64 / 1e6 / (reference.len() - 1) as f64;
-    println!("  帧数 {}，平均帧间隔 {frame_ms:.3} ms", reference.len());
-    println!("  |Δt|：每帧与所取消息的 stamp 之差；复用：与前一帧取到同一条消息");
 
-    let others: Vec<&TopicReport> = reports.iter().filter(|r| r.topic != reference_topic).collect();
-    let width = others.iter().map(|r| r.topic.len()).max().unwrap_or(0);
-    let mut errors = 0;
-    for report in others {
-        let topic = report.topic;
-        let stamps = valid_sorted(report);
-        if stamps.is_empty() {
-            println!("  {topic:<width$}  ✗ 没有有效 stamp");
-            errors += 1;
+    let tolerances = config.topic_tolerances();
+    let stamps: Vec<Vec<i64>> = tolerances.iter().map(|(topic, _)| valid_sorted(topic)).collect();
+    let inputs: Vec<TopicInput> = stamps
+        .iter()
+        .zip(&tolerances)
+        .map(|(stamps, (_, tol_ms))| TopicInput { stamps, max_dt: (tol_ms * 1e6) as i64 })
+        .collect();
+    let options = SyncOptions {
+        max_frame_gap: (sync_config.max_frame_gap * frame_ns) as i64,
+        min_episode_frames: sync_config.min_episode_frames,
+    };
+    let plan = sync::plan(&reference, &inputs, &options);
+
+    println!("  基准帧数     : {}", reference.len());
+    println!("  |Δt|：每帧与所取消息的 stamp 之差；复用：与前一帧取到同一条消息");
+    let width = tolerances.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
+    for ((topic, tol_ms), m) in tolerances.iter().zip(&plan.topics) {
+        if *topic == reference_topic {
             continue;
         }
-        let matched = nearest(&reference, &stamps);
-        let offsets: Vec<f64> = matched
-            .iter()
-            .zip(&reference)
-            .map(|(&i, &t)| (stamps[i] - t).abs() as f64 / 1e6)
-            .collect();
-        let stats = Stats::of(&offsets).expect("reference 非空");
-        let reused = matched.windows(2).filter(|w| w[0] == w[1]).count();
-        let over_half = offsets.iter().filter(|&&x| x > frame_ms / 2.0).count();
-        let mark = if over_half > 0 { "!" } else { "✓" };
+        if m.matched.is_empty() {
+            println!("  ✗ {topic:<width$}  没有有效 stamp，所有帧都是坏帧");
+            continue;
+        }
+        let dt_ms: Vec<f64> = m.abs_dt.iter().map(|&dt| dt as f64 / 1e6).collect();
+        let stats = Stats::of(&dt_ms).expect("基准帧非空");
+        let reused = m.matched.windows(2).filter(|w| w[0] == w[1]).count();
+        let mark = if m.bad_frames > 0 { "!" } else { "✓" };
         println!(
-            "  {mark} {topic:<width$}  |Δt| 平均 {:>7.3}  最大 {:>8.3} ms  复用 {reused:>4} 帧  超过半帧 {over_half:>4} 帧",
-            stats.mean, stats.max
+            "  {mark} {topic:<width$}  容差 {tol_ms:>5.1}  |Δt| 平均 {:>7.3}  最大 {:>8.3} ms  复用 {reused:>4}  坏帧 {:>4}",
+            stats.mean, stats.max, m.bad_frames
         );
     }
-    errors
+
+    if verbose > 0 {
+        println!("  坏帧明细（帧号 @ 相对基准起点的时间：超出容差的 topic 及其 |Δt|）");
+        for frame in (0..reference.len()).filter(|&f| plan.bad[f]) {
+            let offenders: Vec<String> = tolerances
+                .iter()
+                .zip(&plan.topics)
+                .filter_map(|((topic, tol_ms), m)| {
+                    let dt_ms = m.abs_dt.get(frame).map_or(f64::INFINITY, |&dt| dt as f64 / 1e6);
+                    (dt_ms > *tol_ms).then(|| format!("{topic} {dt_ms:.1}ms"))
+                })
+                .collect();
+            let t = (reference[frame] - reference[0]) as f64 / 1e9;
+            println!("    {frame:>5} @ {t:>7.3} s: {}", offenders.join(", "));
+        }
+    }
+
+    let bad_total = plan.bad.iter().filter(|&&b| b).count();
+    let short_total: usize = plan.short_segments.iter().map(|r| r.len()).sum();
+    println!(
+        "  坏帧 {bad_total}，基准断点 {}，过短丢弃 {} 段 {short_total} 帧",
+        plan.gaps,
+        plan.short_segments.len()
+    );
+    println!(
+        "  保留 {} / {} 帧，切分为 {} 个 episode：",
+        plan.kept_frames(),
+        reference.len(),
+        plan.segments.len()
+    );
+    for (i, r) in plan.segments.iter().enumerate() {
+        let duration = (reference[r.end - 1] - reference[r.start]) as f64 / 1e9;
+        println!("    #{i:<3} 帧 {:>5}..{:<5} {:>5} 帧  {duration:>7.3} s", r.start, r.end, r.len());
+    }
+
+    if plan.segments.is_empty() {
+        println!("  ✗ 没有可用的 episode");
+        return 1;
+    }
+    0
 }
 
 fn join(set: &BTreeSet<String>) -> String {

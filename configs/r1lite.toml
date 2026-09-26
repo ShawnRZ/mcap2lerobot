@@ -4,13 +4,18 @@
 #   type = "video"  : 单个图像 topic，编码为视频
 #   type = "vector" : 按 sources 顺序拼接多个 topic 的数值字段，得到一个 float 向量
 #                     field 是消息内的字段路径；names 为空时从消息中推断
-#
-# reference_topic 是时间基准：它的每条消息对应一帧，
-# 其他 topic 按 header.stamp 取与该帧最接近的一条消息
+#                     video feature 和每个 source 都可以用 max_dt_ms 覆盖 sync.max_dt_ms
 
 robot_type = "galaxea_r1lite"
 fps = 30
+
+# 时间对齐：以 reference_topic 的每条消息为一帧，其他 topic 按 header.stamp 取最接近的消息。
+# 任一 topic 的 |Δt| 超过容差的帧是坏帧；首尾坏帧被裁掉，中间的坏帧和基准断点处把数据切成多个 episode。
+[sync]
 reference_topic = "/hdas/camera_head/left_raw/image_raw_color/compressed"
+max_dt_ms = 10          # 默认容差
+max_frame_gap = 1.6     # 基准相邻帧间隔超过 1.6 / fps 时切开
+min_episode_frames = 90 # 少于 3 秒的段丢弃
 
 # ---------- 相机 ----------
 
@@ -23,11 +28,13 @@ topic = "/hdas/camera_head/left_raw/image_raw_color/compressed"
 name = "observation.images.wrist_left"
 type = "video"
 topic = "/hdas/camera_wrist_left/color/image_raw/compressed"
+max_dt_ms = 35  # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
 
 [[feature]]
 name = "observation.images.wrist_right"
 type = "video"
 topic = "/hdas/camera_wrist_right/color/image_raw/compressed"
+max_dt_ms = 35  # 与头部相机非同步触发；约一帧，允许用相邻帧补上丢失的一帧
 
 # ---------- 状态 ----------
 
@@ -48,7 +55,7 @@ name = "action"
 type = "vector"
 sources = [
     { topic = "/motion_target/target_joint_state_arm_left", field = "position" },
-    { topic = "/motion_target/target_position_gripper_left", field = "position" },
+    { topic = "/motion_target/target_position_gripper_left", field = "position", max_dt_ms = 30 }, # 约 20Hz
     { topic = "/motion_target/target_joint_state_arm_right", field = "position" },
-    { topic = "/motion_target/target_position_gripper_right", field = "position" },
+    { topic = "/motion_target/target_position_gripper_right", field = "position", max_dt_ms = 30 }, # 约 20Hz
 ]
