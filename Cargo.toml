@@ -1,0 +1,12 @@
+[package]
+name = "mcap2lerobot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+mcap = "0.25.0"
+memmap2 = "0.9.11"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
