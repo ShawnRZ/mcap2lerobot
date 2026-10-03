@@ -9,7 +9,7 @@
 robot_type = "galaxea_r1lite"
 fps = 30
 # 任务描述，写入每一帧；也可以用 convert --task 指定
-task = "pick up the cup"
+task = "stack the blocks"
 
 # 时间对齐：以 reference_topic 的每条消息为一帧，其他 topic 按 header.stamp 取最接近的消息。
 # 任一 topic 的 |Δt| 超过容差的帧是坏帧；首尾坏帧被裁掉，中间的坏帧和基准断点处把数据切成多个 episode。
