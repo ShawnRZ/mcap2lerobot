@@ -16,6 +16,7 @@ use std::{
 };
 
 use crate::config::VideoConfig;
+use crate::dataset::{self, Format};
 use crate::stats::FeatureStats;
 
 /// 原始图像（sensor_msgs/Image）支持的像素格式
@@ -101,7 +102,7 @@ enum Msg {
     Frame(Frame),
 }
 
-/// 一个 episode 在视频文件中的位置
+/// 一个 episode 在视频文件中的位置；v2.1 中 file_index 即 episode_index
 #[derive(Debug, Clone)]
 pub struct EpisodeVideo {
     pub episode_index: usize,
@@ -125,6 +126,7 @@ pub struct CameraResult {
 #[derive(Clone)]
 pub struct VideoLayout {
     pub root: PathBuf,
+    pub format: Format,
     pub video_key: String,
     pub fps: u32,
     pub chunks_size: usize,
@@ -132,11 +134,21 @@ pub struct VideoLayout {
 }
 
 impl VideoLayout {
+    /// v2.1 中 file_index 即 episode_index
     pub fn path(&self, chunk_index: usize, file_index: usize) -> PathBuf {
-        self.root
-            .join("videos")
-            .join(&self.video_key)
-            .join(format!("chunk-{chunk_index:03}/file-{file_index:03}.mp4"))
+        match self.format {
+            Format::V30 => self
+                .root
+                .join("videos")
+                .join(&self.video_key)
+                .join(format!("chunk-{chunk_index:03}/file-{file_index:03}.mp4")),
+            Format::V21 => self
+                .root
+                .join("videos")
+                .join(format!("chunk-{chunk_index:03}"))
+                .join(&self.video_key)
+                .join(format!("episode_{file_index:06}.mp4")),
+        }
     }
 }
 
@@ -321,15 +333,23 @@ impl Worker {
             ffmpeg.finish()?;
         }
         let (width, height) = self.size.context("没有收到任何帧")?;
-        let info = video_info(&self.layout.path(0, 0), &self.encoder)?;
+        let info = video_info(&self.layout.path(0, 0), &self.encoder, self.layout.format)?;
         crate::progress::finish_frame_bar(&self.bar);
         Ok(CameraResult { episodes: self.result_episodes, stats: self.result_stats, width, height, info })
     }
 
     fn start_episode(&mut self, index: usize, length: usize) -> Result<()> {
         self.end_episode()?;
-        // lerobot：当前文件加上新 episode 超过大小限制时换新文件
-        if let Some(ffmpeg) = &self.ffmpeg {
+        if self.layout.format == Format::V21 {
+            // 每个 episode 一个视频文件
+            if let Some(ffmpeg) = self.ffmpeg.take() {
+                ffmpeg.finish()?;
+            }
+            self.chunk_index = dataset::episode_chunk(index);
+            self.file_index = index;
+            self.frames_in_file = 0;
+        } else if let Some(ffmpeg) = &self.ffmpeg {
+            // lerobot：当前文件加上新 episode 超过大小限制时换新文件
             let size_mb = fs::metadata(&ffmpeg.path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
             if size_mb >= self.layout.file_size_mb {
                 self.next_file()?;
@@ -481,8 +501,8 @@ fn accumulate_pixels(counts: &mut [[u64; 256]; 3], width: usize, height: usize, 
     }
 }
 
-/// 用 ffprobe 读取视频流信息，生成与 lerobot `get_video_info` 相同的字段
-fn video_info(path: &Path, encoder: &VideoConfig) -> Result<Map<String, Json>> {
+/// 用 ffprobe 读取视频流信息，生成与对应版本 lerobot `get_video_info` 相同的字段
+fn video_info(path: &Path, encoder: &VideoConfig, format: Format) -> Result<Map<String, Json>> {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0"])
         .args(["-show_entries", "stream=codec_name,width,height,pix_fmt,r_frame_rate", "-of", "json"])
@@ -500,6 +520,17 @@ fn video_info(path: &Path, encoder: &VideoConfig) -> Result<Map<String, Json>> {
     let pix_fmt = stream["pix_fmt"].as_str().context("ffprobe 缺少 pix_fmt")?;
 
     let mut info = Map::new();
+    if format == Format::V21 {
+        info.insert("video.height".into(), stream["height"].clone());
+        info.insert("video.width".into(), stream["width"].clone());
+        info.insert("video.codec".into(), stream["codec_name"].clone());
+        info.insert("video.pix_fmt".into(), json!(pix_fmt));
+        info.insert("video.is_depth_map".into(), json!(false));
+        info.insert("video.fps".into(), json!(fps as i64));
+        info.insert("video.channels".into(), json!(pix_fmt_channels(pix_fmt)));
+        info.insert("has_audio".into(), json!(false));
+        return Ok(info);
+    }
     info.insert("video.height".into(), stream["height"].clone());
     info.insert("video.width".into(), stream["width"].clone());
     info.insert("video.codec".into(), stream["codec_name"].clone());

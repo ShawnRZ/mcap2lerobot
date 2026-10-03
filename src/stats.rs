@@ -167,12 +167,16 @@ impl FeatureStats {
         if self.image { json!(values.iter().map(|v| [[*v]]).collect::<Vec<_>>()) } else { json!(values) }
     }
 
-    pub fn to_json(&self) -> Json {
+    /// `quantiles` 为 false 时只输出 min/max/mean/std/count（LeRobot v2.1）
+    pub fn to_json(&self, quantiles: bool) -> Json {
         let mut map = serde_json::Map::new();
         for (k, v) in self.named_values().into_iter().take(4) {
             map.insert(k.into(), self.shape_json(v));
         }
         map.insert("count".into(), json!([self.count]));
+        if !quantiles {
+            return Json::Object(map);
+        }
         for (k, v) in QUANTILE_KEYS.iter().zip(&self.quantiles) {
             map.insert((*k).into(), self.shape_json(v));
         }

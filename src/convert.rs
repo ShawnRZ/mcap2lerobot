@@ -13,7 +13,7 @@ use std::{
 use crate::cdr::CdrReader;
 use crate::config::{Config, FeatureKind};
 use crate::dataset::{
-    self, DataWriter, EpisodeMeta, FeatureSpec, MetaWriter, VIDEO_FILE_SIZE_MB, VideoLocation,
+    self, DataWriter, EpisodeMeta, FeatureSpec, Format, MetaWriter, VIDEO_FILE_SIZE_MB, VideoLocation,
 };
 use crate::inputs;
 use crate::decode::StreamDecoder;
@@ -54,6 +54,10 @@ pub struct ConvertArgs {
     /// 输出目录已存在时删除后重新生成（只会删除 LeRobot 数据集目录或空目录）
     #[arg(long)]
     force: bool,
+
+    /// 输出的 LeRobot 数据集版本：v3.0（lerobot ≥ 0.4）或 v2.1（lerobot 0.1 ~ 0.3）
+    #[arg(long, value_enum, default_value = "v3.0")]
+    format: Format,
 
     /// 跳过开始转换前的确认
     #[arg(short, long)]
@@ -145,6 +149,7 @@ impl CameraFeed {
 struct Converter<'a> {
     config: &'a Config,
     fps: u32,
+    format: Format,
     task: String,
     output: PathBuf,
     sources: Vec<SourceState>,
@@ -186,7 +191,7 @@ pub fn run(args: &ConvertArgs, _verbose: u8) -> Result<()> {
     }
 
     let files = &inputs.files;
-    let mut converter = Converter::new(&config, task, &args.output);
+    let mut converter = Converter::new(&config, args.format, task, &args.output);
     for (i, input) in files.iter().enumerate() {
         converter.log(format!("[{}/{}] {}", i + 1, files.len(), input.display()));
         converter.convert_file(input).with_context(|| format!("转换 {} 失败", input.display()))?;
@@ -237,7 +242,7 @@ struct TopicScan {
 }
 
 impl<'a> Converter<'a> {
-    fn new(config: &'a Config, task: String, output: &Path) -> Self {
+    fn new(config: &'a Config, format: Format, task: String, output: &Path) -> Self {
         let progress = MultiProgress::new();
         let feature_bars: Vec<ProgressBar> = config
             .features
@@ -258,6 +263,7 @@ impl<'a> Converter<'a> {
                 FeatureKind::Video { topic, .. } => {
                     let layout = VideoLayout {
                         root: output.to_path_buf(),
+                        format,
                         video_key: f.name.clone(),
                         fps: config.fps,
                         chunks_size: dataset::CHUNKS_SIZE,
@@ -300,6 +306,7 @@ impl<'a> Converter<'a> {
         Self {
             config,
             fps: config.fps,
+            format,
             task,
             output: output.to_path_buf(),
             sources,
@@ -482,7 +489,7 @@ impl<'a> Converter<'a> {
 
         // ---------- 写出各 episode 的数值数据 ----------
         let specs = self.feature_specs()?;
-        let data = self.data.get_or_insert_with(|| DataWriter::new(&self.output, self.fps, &specs));
+        let data = self.data.get_or_insert_with(|| DataWriter::new(&self.output, self.format, self.fps, &specs));
         for (episode_index, start, length) in episode_ranges {
             let mut vectors = Vec::new();
             let mut stats = HashMap::new();
@@ -589,6 +596,7 @@ impl<'a> Converter<'a> {
 
         let meta = MetaWriter {
             root: &self.output,
+            format: self.format,
             fps: self.fps,
             robot_type: self.config.robot_type.as_deref(),
             features: &specs,
